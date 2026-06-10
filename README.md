@@ -4,29 +4,29 @@ Welcome! This is a modern, high-performance, asynchronous Telegram bot powered b
 
 ---
 
-## 🌟 Key Features
+## Key Features
 
-*   **⚡ Real-Time Streaming Responses**: Utilizes `generate_content_stream` to display Gemini's response chunk-by-chunk in real-time, reducing perceived latency to near zero. Includes a dynamic typing cursor (`▌`).
-*   **👥 Personalized Greetings**: Supports `/adddetail` to collect the user's full name. The bot stores this and feeds it into the system instructions, allowing Gemini to chat with the user by name.
-*   **🧠 FAISS Vector Memory**: Generates semantic embeddings of user prompts using `gemini-embedding-001` (3072 dimensions) and indexes them on-disk with FAISS.
-*   **📁 SQLite Metadata Store**: Persists chat timestamps, usernames, message logs, and responses, cleanly linked 1:1 to the FAISS index keys.
-*   **💬 Warm Chatbot Personality**: Configured via system instructions to behave like a close, supportive friend who always includes expressive emojis in its responses.
-*   **⚙️ Throttle Optimization**: Throttles message edits to once every `0.8s` to speed up display rendering while staying safely within Telegram's rate-limiting rules.
-*   **🛡️ Robust Error Fallbacks**: Features automatic markdown-to-plain-text formatting fallback if Telegram fails to parse unescaped AI markdown characters.
+*   **Real-Time Streaming Responses**: Utilizes `generate_content_stream` to display Gemini's response chunk-by-chunk in real-time, reducing perceived latency to near zero. Includes a dynamic typing cursor (`▌`).
+*   **Personalized Greetings**: Supports `/adddetail` to collect the user's full name. The bot stores this and feeds it into the system instructions, allowing Gemini to chat with the user by name.
+*   **FAISS Vector Memory**: Generates semantic embeddings of user prompts using `gemini-embedding-001` (3072 dimensions) and indexes them on-disk with FAISS.
+*   **SQLite Metadata Store**: Persists chat timestamps, usernames, message logs, and responses, cleanly linked 1:1 to the FAISS index keys.
+*   **Warm Chatbot Personality**: Configured via system instructions to behave like a close, supportive friend who always includes expressive emojis in its responses.
+*   **Throttle Optimization**: Throttles message edits to once every `0.8s` to speed up display rendering while staying safely within Telegram's rate-limiting rules.
+*   **Robust Error Fallbacks**: Features automatic markdown-to-plain-text formatting fallback if Telegram fails to parse unescaped AI markdown characters.
 
 ---
 
-## 🛠️ Architecture Overview
+## Architecture Overview
 
 When a user chats with the bot:
-1. **Gemini Streaming**: The bot queries Gemini, streaming the response text back to the Telegram chat.
-2. **Asynchronous Vectorization**: Once the conversation finishes, the bot launches an asynchronous background task.
-3. **Embedding Generation**: The prompt is embedded using `gemini-embedding-001`.
-4. **Local DB Save**: The embedding vector is appended to the local FAISS index (`bot_history.index`), and message metadata is saved to SQLite (`bot_history.db`) on a background worker thread (`asyncio.to_thread`) to ensure zero lag.
+1. Gemini Streaming: The bot queries Gemini, streaming the response text back to the Telegram chat.
+2. Asynchronous Vectorization: Once the conversation finishes, the bot launches an asynchronous background task.
+3. Embedding Generation: The prompt is embedded using `gemini-embedding-001`.
+4. Local DB Save: The embedding vector is appended to the local FAISS index (`bot_history.index`), and message metadata is saved to SQLite (`bot_history.db`) on a background worker thread (`asyncio.to_thread`) to ensure zero lag.
 
 ---
 
-## ⚙️ Setup & Installation
+## Setup & Installation
 
 ### Prerequisites
 Make sure you have **Python 3.10+** installed on your system.
@@ -63,7 +63,7 @@ GEMINI_MODEL=gemini-2.5-flash
 
 ---
 
-## 🚀 Running the Bot
+## Running the Bot
 
 Start the bot locally:
 ```bash
@@ -72,7 +72,7 @@ python bot.py
 
 ---
 
-## ⌨️ Bot Commands
+## Bot Commands
 
 *   `/start` - Initializes the chat, greets you (personally, if your name is saved), and lists available commands.
 *   `/help` - Shows general instruction guidelines.
@@ -82,7 +82,7 @@ python bot.py
 
 ---
 
-## 📁 File Structure
+## File Structure
 
 ```text
 ├── .env                  # Private credentials and model settings (ignored by git)
