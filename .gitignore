@@ -2,3 +2,5 @@
 .env
 __pycache__/
 *.pyc
+bot_history.db
+bot_history.index
