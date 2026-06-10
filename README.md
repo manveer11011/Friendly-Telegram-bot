@@ -1,74 +1,73 @@
-# Friendly Gemini-Powered Telegram Bot (with FAISS Vector DB)
+# Dual-Mode Friendly Telegram Bot (Local GPU or Gemini Cloud API)
 
-Welcome! This is a modern, high-performance, asynchronous Telegram bot powered by **Google's Gemini models** and backed by a local **FAISS Vector Database** + **SQLite metadata store** for semantic memory and history tracking.
+Welcome! This is a modern, high-performance, asynchronous Telegram bot that supports two execution modes, controlled dynamically via environment variables:
+
+1. **Local Mode (`MODE=local`)**: Runs entirely offline on your local GPU/CPU. It is powered by **Qwen3-4B** for chat generation and backed by a local **FAISS Vector Database** + **SQLite metadata store** using a local `all-MiniLM-L6-v2` sentence-transformer model (384 dimensions).
+2. **API Mode (`MODE=api`)**: Runs online using the **Gemini Developer API** for fast, resource-efficient chat generation, and uses Gemini's embeddings (3072 dimensions) for FAISS + SQLite semantic memory without requiring heavy local GPU resources.
 
 ---
 
 ## Key Features
 
-*   **Real-Time Streaming Responses**: Utilizes `generate_content_stream` to display Gemini's response chunk-by-chunk in real-time, reducing perceived latency to near zero. Includes a dynamic typing cursor (`▌`).
-*   **Personalized Greetings**: Supports `/adddetail` to collect the user's full name. The bot stores this and feeds it into the system instructions, allowing Gemini to chat with the user by name.
-*   **FAISS Vector Memory**: Generates semantic embeddings of user prompts using `gemini-embedding-001` (3072 dimensions) and indexes them on-disk with FAISS.
-*   **SQLite Metadata Store**: Persists chat timestamps, usernames, message logs, and responses, cleanly linked 1:1 to the FAISS index keys.
-*   **Warm Chatbot Personality**: Configured via system instructions to behave like a close, supportive friend who always includes expressive emojis in its responses.
-*   **Throttle Optimization**: Throttles message edits to once every `0.8s` to speed up display rendering while staying safely within Telegram's rate-limiting rules.
-*   **Robust Error Fallbacks**: Features automatic markdown-to-plain-text formatting fallback if Telegram fails to parse unescaped AI markdown characters.
-
----
-
-## Architecture Overview
-
-When a user chats with the bot:
-1. Gemini Streaming: The bot queries Gemini, streaming the response text back to the Telegram chat.
-2. Asynchronous Vectorization: Once the conversation finishes, the bot launches an asynchronous background task.
-3. Embedding Generation: The prompt is embedded using `gemini-embedding-001`.
-4. Local DB Save: The embedding vector is appended to the local FAISS index (`bot_history.index`), and message metadata is saved to SQLite (`bot_history.db`) on a background worker thread (`asyncio.to_thread`) to ensure zero lag.
+*   **Real-Time Streaming Responses**: Displays the bot's response chunk-by-chunk in real-time with a dynamic typing cursor (`▌`) to reduce perceived latency.
+*   **Dual Mode Configuration**: Instantly switches between local offline GPU inference and online cloud API text/embeddings using the `MODE` setting in `.env`.
+*   **Unified SQLite Database & Isolated Indexes**: Prevents FAISS dimension conflicts by storing embeddings in mode-specific FAISS files while logging conversation metadata in a single shared SQLite database:
+    *   **Shared SQLite Metadata**: Saves all metadata to `bot_history.db` with a `mode` column (`api` or `local`) and mapping `faiss_id`.
+    *   **Local Index**: Saves local 384-dimensional vector embeddings to `bot_history_local.index`.
+    *   **API Index**: Saves API 3072-dimensional vector embeddings to `bot_history_api.index`.
+*   **Personalized Greetings**: Supports `/adddetail` to collect the user's full name, saving it to SQLite and injecting it into chatbot system instructions.
+*   **Asynchronous Background Logging**: Computes embeddings and saves transaction logs asynchronously on a background worker thread (`asyncio.create_task` + `asyncio.to_thread`) for lag-free performance.
+*   **Warm Chatbot Personality**: Configured via custom system instructions to behave like a close, warm, and supportive friend who includes multiple expressive emojis in every response.
 
 ---
 
 ## Setup & Installation
 
 ### Prerequisites
-Make sure you have **Python 3.10+** installed on your system.
+Make sure you have **Python 3.12** installed on your Windows system (recommended for stable CUDA PyTorch wheels).
 
-### 1. Clone & Initialize Environment
+### 1. Initialize Environment
 In the project directory, initialize a Python virtual environment:
-```bash
-# Create virtual environment
-python -m venv .venv
+```powershell
+# Create virtual environment using Python 3.12
+py -3.12 -m venv .venv
 
-# Activate virtual environment (Windows)
-.venv\Scripts\activate
-
-# Activate virtual environment (Mac/Linux)
-source .venv/bin/activate
+# Activate virtual environment (Windows PowerShell)
+.venv\Scripts\Activate.ps1
 ```
 
 ### 2. Install Dependencies
-Install the required dependencies inside your activated virtual environment:
-```bash
+Install PyTorch with CUDA 12.1 support, Hugging Face transformers, and Gemini integration packages:
+```powershell
 pip install -r requirements.txt
 ```
 
-### 3. Configure API Credentials
-Create a `.env` file in the root directory (based on the template provided) and add your keys:
+### 3. Configure `.env`
+Create or update a `.env` file in the root directory:
 ```env
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-GEMINI_API_KEY=your_google_gemini_api_key
+GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-2.5-flash
+MODE=local
 ```
 
-*   **Telegram Bot Token**: Get this by messaging **@BotFather** on Telegram.
-*   **Gemini API Key**: Create a free key at [Google AI Studio](https://aistudio.google.com/).
+#### Settings Details:
+*   `TELEGRAM_BOT_TOKEN`: Token obtained from **@BotFather** on Telegram.
+*   `GEMINI_API_KEY`: API key from Google AI Studio (only required if `MODE=api`).
+*   `MODE`: Either `local` (offline GPU/CPU execution) or `api` (online cloud API execution).
+*   **Model Path**: The model is loaded directly from your local disk path: `D:\models\Qwen3-4B`
 
 ---
 
 ## Running the Bot
 
 Start the bot locally:
-```bash
-python bot.py
+```powershell
+.venv\Scripts\python bot.py
 ```
+
+*   **Local Mode Startup**: Takes about 15–30 seconds during startup to load Qwen checkpoint shards and SentenceTransformers into GPU memory.
+*   **API Mode Startup**: Launches instantly since no heavy local models are loaded.
 
 ---
 
@@ -78,18 +77,20 @@ python bot.py
 *   `/help` - Shows general instruction guidelines.
 *   `/adddetail` - Prompts you to enter your full name so the bot can personalize its replies.
 *   `/cancel` - Cancels the active `/adddetail` input prompt.
-*   `/history` - Retrieves your last 10 logged conversation entries from the FAISS database.
+*   `/history` - Retrieves your last 10 logged conversation entries from the FAISS database for the active mode.
 
 ---
 
 ## File Structure
 
 ```text
-├── .env                  # Private credentials and model settings (ignored by git)
+├── .env                  # Private credentials, active mode selection, and API keys
 ├── .gitignore            # Excludes venv, cached files, and database files
-├── requirements.txt      # Project packages (python-telegram-bot, google-genai, faiss-cpu, numpy)
-├── bot.py                # Main Telegram application, command/message handlers, background tasks
-├── db_manager.py         # VectorDBManager for FAISS and SQLite operations
-├── bot_history.db        # Persisted SQLite database (created on startup)
-└── bot_history.index     # Persisted FAISS vector index (created on first message)
+├── requirements.txt      # Pinned dependency packages
+├── bot.py                # Main Telegram application, streaming response logic, and message routing
+├── db_manager.py         # Dynamic VectorDBManager managing isolated database indexes and schemas
+├── bot_history.db        # Unified SQLite database for both modes (contains a "mode" column)
+├── bot_history_local.index # FAISS index file (384 dimensions) for local mode
+└── bot_history_api.index # FAISS index file (3072 dimensions) for API mode
 ```
+

@@ -1,6 +1,7 @@
 import logging
 import os
 import asyncio
+import threading
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -26,9 +27,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global placeholders
-client = None
-gemini_model = "gemini-2.5-flash"
+tokenizer = None
+model = None
+embedding_model = None
+client = None  # Gemini API Client
 db = None
+
+# Mode Configuration (api / local)
+MODE = os.getenv("MODE", "local").lower()
+
+# Local Model Configuration
+MODEL_PATH = r"D:\models\Qwen3-4B"
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
 # Conversation Handler States
 AWAITING_FULL_NAME = 1
@@ -114,10 +124,11 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("You don't have any logged conversation history yet!")
             return
             
-        reply_lines = ["*Your Recent Chat History (Last 10 messages):*"]
+        reply_lines = ["*Your Recent Chat History (Last 10 messages) - Unified (FREE & PREMIUM):*"]
         # history is ordered by timestamp DESC, so we reverse it to show chronological order
-        for idx, (msg, reply, timestamp) in enumerate(reversed(history), 1):
-            reply_lines.append(f"\n{idx}. *[{timestamp}]*")
+        for idx, (msg, reply, timestamp, row_mode) in enumerate(reversed(history), 1):
+            mode_label = "PREMIUM" if row_mode == "api" else "FREE"
+            reply_lines.append(f"\n{idx}. *[{timestamp}]* (Mode: {mode_label})")
             reply_lines.append(f"❓ *You:* {msg}")
             reply_lines.append(f"🤖 *Bot:* {reply}")
             
@@ -136,17 +147,21 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Background task to embed and log the conversation
 async def log_conversation_bg(user_id: int, username: str, user_message: str, bot_reply: str):
     try:
-        logger.info(f"Generating embedding for user message: '{user_message[:30]}...'")
+        logger.info(f"Generating embedding for user message in {MODE} mode...")
         
-        # Get embedding vector using Gemini API
-        embed_response = await client.aio.models.embed_content(
-            model="gemini-embedding-001",
-            contents=user_message,
-        )
+        if MODE == "api":
+            # API Mode: Call Gemini Embedding API
+            embed_response = await client.aio.models.embed_content(
+                model="gemini-embedding-001",
+                contents=user_message,
+            )
+            embedding_vector = embed_response.embeddings[0].values
+        else:
+            # Local Mode: Call local sentence-transformers
+            embedding_np = await asyncio.to_thread(embedding_model.encode, user_message)
+            embedding_vector = embedding_np.tolist()
         
-        embedding_vector = embed_response.embeddings[0].values
-        
-        # Save embedding and metadata using a background thread (to avoid blocking async loop)
+        # Save embedding and metadata using a background thread
         await asyncio.to_thread(
             db.insert_entry, 
             embedding_vector, 
@@ -155,17 +170,59 @@ async def log_conversation_bg(user_id: int, username: str, user_message: str, bo
             user_message, 
             bot_reply
         )
-        logger.info("Successfully saved conversation to FAISS and SQLite.")
+        logger.info(f"Successfully saved conversation to FAISS and SQLite ({MODE} mode).")
         
     except Exception as db_err:
         logger.error(f"Failed to log conversation to database: {db_err}")
 
-# Message handler for chatting with Gemini
+# Async generator to yield streamed chunks from local model
+async def generate_local_stream(user_text: str, instruction: str):
+    from transformers import TextIteratorStreamer
+    messages = [
+        {"role": "system", "content": instruction},
+        {"role": "user", "content": user_text}
+    ]
+    
+    # Format the prompt using Qwen's template
+    prompt = tokenizer.apply_chat_template(
+        messages, 
+        tokenize=False, 
+        add_generation_prompt=True
+    )
+    
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    
+    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+    generation_kwargs = dict(inputs, streamer=streamer, max_new_tokens=512)
+    
+    # Run the generate method in a separate thread so it doesn't block the loop
+    thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
+    thread.start()
+    
+    # Yield tokens as they arrive
+    while True:
+        chunk = await asyncio.to_thread(lambda: next(iter(streamer), None))
+        if chunk is None:
+            break
+        yield chunk
+
+def remove_thinking_tags(text: str) -> str:
+    """Removes `<think>...</think>` tags and any content inside them.
+    Also handles open-ended `<think>` blocks during streaming."""
+    import re
+    # Remove complete <think>...</think> blocks
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # If there is an unclosed <think> tag left, strip everything from it to the end
+    if "<think>" in cleaned:
+        cleaned = cleaned.split("<think>")[0]
+    return cleaned
+
+# Message handler for chatting with Gemini or local model
 async def chat_with_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.first_name or "Unknown"
-    logger.info(f"Received message: '{user_text}' from user: {user_id}")
+    logger.info(f"Received message: '{user_text}' from user: {user_id} in {MODE} mode")
     
     # Send a placeholder reply message that we will edit dynamically
     placeholder_msg = await update.message.reply_text("Thinking...")
@@ -185,40 +242,49 @@ async def chat_with_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "CRITICAL: You MUST include multiple emojis in every single response you send. "
             "Every response should be expressive, engaging, and loaded with friendly emojis."
         )
-            
-        # Configure Gemini system instructions to request concise responses for faster generation
-        config = types.GenerateContentConfig(
-            system_instruction=instruction
-        )
         
-        # Request a stream from the Gemini API
-        response_stream = await client.aio.models.generate_content_stream(
-            model=gemini_model,
-            contents=user_text,
-            config=config,
-        )
+        if MODE == "api":
+            # API Mode Streaming
+            config = types.GenerateContentConfig(
+                system_instruction=instruction
+            )
+            response_stream = await client.aio.models.generate_content_stream(
+                model=gemini_model,
+                contents=user_text,
+                config=config,
+            )
+        else:
+            # Local Mode Streaming
+            response_stream = generate_local_stream(user_text, instruction)
         
         async for chunk in response_stream:
-            if chunk.text:
-                accumulated_text += chunk.text
-                
-                # Update the message in Telegram, throttling to once every 0.8s for faster rendering
-                if accumulated_text.strip():
-                    current_time = asyncio.get_event_loop().time()
-                    if current_time - last_update_time > 0.8:
-                        try:
-                            await context.bot.edit_message_text(
-                                chat_id=update.effective_chat.id,
-                                message_id=placeholder_msg.message_id,
-                                text=accumulated_text + " ▌"  # cursor character
-                            )
-                            last_update_time = current_time
-                        except Exception as edit_err:
-                            logger.warning(f"Error during stream update: {edit_err}")
-                            pass
+            if chunk:
+                # Safely extract text chunk dynamically (local uses str, API uses object chunk.text)
+                text_chunk = chunk if isinstance(chunk, str) else chunk.text
+                if text_chunk:
+                    accumulated_text += text_chunk
+                    
+                    # Update the message in Telegram, throttling to once every 0.8s for faster rendering
+                    cleaned_display = remove_thinking_tags(accumulated_text)
+                    if cleaned_display.strip():
+                        current_time = asyncio.get_event_loop().time()
+                        if current_time - last_update_time > 0.8:
+                            try:
+                                await context.bot.edit_message_text(
+                                    chat_id=update.effective_chat.id,
+                                    message_id=placeholder_msg.message_id,
+                                    text=cleaned_display + " ▌"  # cursor character
+                                )
+                                last_update_time = current_time
+                            except Exception as edit_err:
+                                logger.warning(f"Error during stream update: {edit_err}")
+                                pass
         
+        # Process the final clean content
+        accumulated_text = remove_thinking_tags(accumulated_text)
         if not accumulated_text.strip():
             accumulated_text = "I couldn't generate a response."
+
             
         # Final update to send the complete formatted response
         try:
@@ -239,11 +305,11 @@ async def chat_with_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as final_err:
                 logger.error(f"Failed to edit final fallback message: {final_err}")
         
-        # Run DB logging asynchronously in the background so we don't slow down the chat interface
+        # Run DB logging asynchronously in the background
         asyncio.create_task(log_conversation_bg(user_id, username, user_text, accumulated_text))
                 
     except Exception as e:
-        logger.error(f"Error calling Gemini API stream: {e}")
+        logger.error(f"Error calling model stream ({MODE} mode): {e}")
         try:
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
@@ -254,31 +320,57 @@ async def chat_with_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 def main():
-    # Retrieve the tokens from environment variables
+    # Retrieve the bot token from environment variables
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    gemini_key = os.getenv("GEMINI_API_KEY")
     
-    has_errors = False
     if not bot_token or bot_token == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
         logger.error("TELEGRAM_BOT_TOKEN is missing or not set in the .env file!")
-        has_errors = True
-        
-    if not gemini_key or gemini_key == "YOUR_GEMINI_API_KEY_HERE":
-        logger.error("GEMINI_API_KEY is missing or not set in the .env file!")
-        has_errors = True
-        
-    if has_errors:
-        print("\n[ERROR] Configuration missing! Please check your .env file and set both TELEGRAM_BOT_TOKEN and GEMINI_API_KEY.\n")
+        print("\n[ERROR] Bot token missing! Please check your .env file and set TELEGRAM_BOT_TOKEN.\n")
         return
 
-    # Initialize the Database
+    # Initialize the Database based on current MODE
     global db
-    db = VectorDBManager()
+    db = VectorDBManager(mode=MODE)
 
-    # Initialize the Gemini Client
-    global client, gemini_model
+    # Initialize the model / client based on current MODE
+    global client, tokenizer, model, embedding_model, gemini_model
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    client = genai.Client(api_key=gemini_key)
+    
+    if MODE == "api":
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_key or gemini_key == "YOUR_GEMINI_API_KEY_HERE":
+            logger.error("GEMINI_API_KEY is missing or not set in the .env file!")
+            print("\n[ERROR] Gemini API Key missing! Please check your .env file and set GEMINI_API_KEY.\n")
+            return
+            
+        logger.info("Initializing Gemini Cloud Client (API Mode)...")
+        client = genai.Client(api_key=gemini_key)
+        logger.info("Gemini Cloud Client successfully initialized.")
+    else:
+        logger.info("Initializing Local GPU Model loader (Local Mode)...")
+        from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+        from sentence_transformers import SentenceTransformer
+        import torch
+        
+        logger.info(f"Loading local tokenizer from: {MODEL_PATH}...")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+        
+        logger.info(f"Loading local causal LM model from: {MODEL_PATH} in 4-bit quantization...")
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_PATH,
+            quantization_config=bnb_config,
+            device_map="auto"
+        )
+        
+        logger.info(f"Loading sentence-transformer embedding model: {EMBEDDING_MODEL_NAME}...")
+        embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        logger.info("All local models successfully initialized and ready!")
 
     # Build the application with the bot's token
     application = ApplicationBuilder().token(bot_token).build()
@@ -292,7 +384,7 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_add_detail)],
     )
 
-    # Register handlers (ConversationHandler must be registered before the general chat handler)
+    # Register handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("history", history_command))
@@ -300,7 +392,8 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_with_gemini))
 
     # Run the bot (polls updates from Telegram)
-    logger.info("Bot starting up... Press Ctrl+C to stop.")
+    display_mode = "PREMIUM" if MODE == "api" else "FREE"
+    logger.info(f"Bot starting up in {display_mode} mode... Press Ctrl+C to stop.")
     application.run_polling()
 
 if __name__ == '__main__':
